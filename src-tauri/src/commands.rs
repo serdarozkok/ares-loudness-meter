@@ -6,7 +6,7 @@ use crate::audio_capture::{
 };
 use crate::dsp::offline_analyzer::{self, OfflineResult};
 use crate::lan_server::{LanInfo, LanMirrorServer};
-use crate::settings::{save_settings, Settings};
+use crate::settings::{save_settings, sync_autostart, Settings};
 use base64::Engine as _;
 use crossbeam_channel::Sender;
 use parking_lot::Mutex;
@@ -38,6 +38,7 @@ pub fn update_settings(app: AppHandle, state: State<'_, AppState>, settings: Set
         *guard = settings.clone();
     }
     save_settings(&settings);
+    sync_autostart(settings.auto_start);
     let _ = state.engine_tx.send(EngineCommand::ApplySettings(settings.clone()));
     if let Some(win) = app.get_webview_window("inspector") {
         let _ = win.set_always_on_top(settings.pinned);

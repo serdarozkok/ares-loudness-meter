@@ -34,6 +34,7 @@ export const DEFAULT_SETTINGS: Settings = {
   cardOrder: [...ALL_CARDS],
   sectionOrder: [...ALL_SECTIONS],
   pinned: false,
+  autoStart: true,
 };
 
 /** Ensures order arrays contain every known id exactly once (robust against older persisted files). */

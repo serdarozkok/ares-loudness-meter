@@ -42,6 +42,7 @@ export interface Settings {
   cardOrder: CardId[];
   sectionOrder: SectionId[];
   pinned: boolean;
+  autoStart: boolean;
 }
 
 export interface GraphPoint {

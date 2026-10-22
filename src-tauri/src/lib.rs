@@ -276,6 +276,7 @@ pub fn run() {
     }
 
     let initial_settings = load_settings();
+    settings::sync_autostart(initial_settings.auto_start);
     let (engine_tx, engine_rx) = unbounded();
     let lan = Arc::new(LanMirrorServer::new());
 

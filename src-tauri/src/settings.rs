@@ -23,6 +23,10 @@ impl Default for AlertSettings {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -45,6 +49,8 @@ pub struct Settings {
     pub card_order: Vec<String>,
     pub section_order: Vec<String>,
     pub pinned: bool,
+    #[serde(default = "default_true")]
+    pub auto_start: bool,
 }
 
 impl Default for Settings {
@@ -85,6 +91,7 @@ impl Default for Settings {
             ],
             section_order: vec!["cards".into(), "graph".into(), "phase".into()],
             pinned: false,
+            auto_start: true,
         }
     }
 }
@@ -141,5 +148,60 @@ pub fn save_settings(s: &Settings) {
     let path = config_path();
     if let Ok(json) = serde_json::to_string_pretty(s) {
         let _ = fs::write(path, json);
+    }
+}
+
+pub fn sync_autostart(enabled: bool) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let run_key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+        if enabled {
+            if let Ok(exe) = std::env::current_exe() {
+                let quoted = format!("\"{}\"", exe.display());
+                let _ = std::process::Command::new("reg")
+                    .args(["add", run_key, "/v", "ARESLoudnessMeter", "/t", "REG_SZ", "/d", &quoted, "/f"])
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .status();
+            }
+        } else {
+            let _ = std::process::Command::new("reg")
+                .args(["delete", run_key, "/v", "ARESLoudnessMeter", "/f"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .status();
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = std::env::var_os("HOME") {
+            let agents_dir = PathBuf::from(home).join("Library/LaunchAgents");
+            let plist_path = agents_dir.join("com.aresaudio.loudnessmeter.plist");
+            if enabled {
+                if let Ok(exe) = std::env::current_exe() {
+                    let _ = fs::create_dir_all(&agents_dir);
+                    let plist = format!(
+                        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aresaudio.loudnessmeter</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>"#,
+                        exe.display()
+                    );
+                    let _ = fs::write(plist_path, plist);
+                }
+            } else {
+                let _ = fs::remove_file(plist_path);
+            }
+        }
     }
 }

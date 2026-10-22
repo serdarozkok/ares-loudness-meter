@@ -329,6 +329,21 @@ export function SettingsPanel({ settings, onClose }: Props) {
             APPEARANCE & MINI-BAR
           </div>
 
+          <label className="flex cursor-pointer items-center justify-between rounded-lg border border-line bg-surface2 px-2.5 py-2">
+            <div>
+              <div className="text-xs font-semibold text-fg">Launch at System Startup</div>
+              <div className="text-[10px] text-muted">
+                Start ARES Loudness Meter automatically when you sign in
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              checked={settings.autoStart ?? true}
+              onChange={(e) => updateSettings({ autoStart: e.target.checked })}
+              className="accent-emerald-500"
+            />
+          </label>
+
           <div>
             <label className="block text-[10px] font-semibold text-muted uppercase">Theme</label>
             <div className="mt-1 grid grid-cols-3 gap-1.5">
