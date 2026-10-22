@@ -878,6 +878,8 @@ struct AuxCaptureEntry {
     is_asio_loopback: bool,
     stream: win_impl::ActiveCaptureStream,
     buf: Vec<f32>,
+    env_peak: f32,
+    last_packet: std::time::Instant,
 }
 
 /// Manages active WASAPI / ASIO Hardware Loopback / Process Loopback / ASIO IPC streams on Windows.
@@ -895,6 +897,8 @@ pub struct AudioCaptureController {
     aux_streams: Vec<AuxCaptureEntry>,
     active_aux_id: Option<String>,
     aux_last_signal: std::time::Instant,
+    primary_env_peak: f32,
+    primary_last_packet: std::time::Instant,
     direct_exclude_stream: Option<(u32, win_impl::ActiveCaptureStream)>,
     excluded_pid_streams: HashMap<u32, win_impl::ActiveCaptureStream>,
     ipc_reader: Option<IpcBridgeReader>,
@@ -926,6 +930,7 @@ impl AudioCaptureController {
         channel_pair: usize,
         ignored_apps: Vec<String>,
     ) -> Self {
+        let now = std::time::Instant::now();
         let mut ctrl = Self {
             _com: win_impl::ComGuard::init(),
             input_source,
@@ -938,14 +943,16 @@ impl AudioCaptureController {
             endpoint_stream: None,
             aux_streams: Vec::new(),
             active_aux_id: None,
-            aux_last_signal: std::time::Instant::now(),
+            aux_last_signal: now,
+            primary_env_peak: 0.0,
+            primary_last_packet: now,
             direct_exclude_stream: None,
             excluded_pid_streams: HashMap::new(),
             ipc_reader: None,
             sample_rate: 48_000,
             mode: CaptureMode::None,
             status_msg: None,
-            last_check: std::time::Instant::now(),
+            last_check: now,
             scratch_sub: Vec::with_capacity(4096),
             scratch_ipc: Vec::with_capacity(4096),
         };
@@ -975,6 +982,7 @@ impl AudioCaptureController {
         self.endpoint_stream = None;
         self.aux_streams.clear();
         self.active_aux_id = None;
+        self.primary_env_peak = 0.0;
         self.direct_exclude_stream = None;
         self.excluded_pid_streams.clear();
         self.ipc_reader = IpcBridgeReader::open_or_create().ok();
@@ -1008,9 +1016,6 @@ impl AudioCaptureController {
                 }
             }
 
-            // Also open all active ASIO / Hardware Loopback eCapture endpoints (e.g. "Loop-back 1/2 (2- Audient iD14)")
-            // and secondary eRender output endpoints so when a DAW runs in ASIO mode (Audient ASIO, FL Studio ASIO,
-            // ASIO4ALL, etc.), its signal is automatically detected and measured without manual switching.
             let explicit_capture_selected = self
                 .desired_device_id
                 .as_ref()
@@ -1025,7 +1030,6 @@ impl AudioCaptureController {
                     }
                     let is_capture = dev.id.starts_with("{0.0.1.");
                     let is_asio_lb = is_capture && dev.name.contains("[ASIO Loopback]");
-                    // Monitor all ASIO/Hardware Loopback eCapture endpoints + all active eRender outputs
                     if !is_asio_lb && is_capture {
                         continue;
                     }
@@ -1036,10 +1040,11 @@ impl AudioCaptureController {
                             is_asio_loopback: is_asio_lb,
                             stream,
                             buf: Vec::with_capacity(4096),
+                            env_peak: 0.0,
+                            last_packet: std::time::Instant::now(),
                         });
                     }
                 }
-                // Prioritize Hardware ASIO Loopback streams first
                 self.aux_streams.sort_by_key(|a| !a.is_asio_loopback);
             }
         }
@@ -1165,7 +1170,7 @@ impl AudioCaptureController {
             return;
         }
 
-        // 0. Check automatic background IPC bridge (e.g. if user placed VST3 bridge in DAW)
+        // 0. Check automatic background IPC bridge
         self.scratch_ipc.clear();
         if let Some(ref mut ipc) = self.ipc_reader {
             ipc.read_available(&mut self.scratch_ipc);
@@ -1179,6 +1184,8 @@ impl AudioCaptureController {
         }
 
         unsafe {
+            let now = std::time::Instant::now();
+
             // 1. Drain primary endpoint stream
             if let Some((_, ref direct)) = self.direct_exclude_stream {
                 if let Some(ref ep) = self.endpoint_stream {
@@ -1190,14 +1197,7 @@ impl AudioCaptureController {
                 ep.drain_stereo(self.channel_pair, out);
             }
 
-            // 2. Drain all auxiliary ASIO Loopback & secondary output streams every cycle
-            let pair = self.channel_pair;
-            for aux in &mut self.aux_streams {
-                aux.buf.clear();
-                aux.stream.drain_stereo(pair, &mut aux.buf);
-            }
-
-            // 3. Subtract any ignored app streams from primary out
+            // 2. Subtract any ignored app streams from primary out
             if !self.excluded_pid_streams.is_empty() && !out.is_empty() {
                 for stream in self.excluded_pid_streams.values() {
                     self.scratch_sub.clear();
@@ -1209,54 +1209,91 @@ impl AudioCaptureController {
                 }
             }
 
-            // 4. Smart ASIO / Active Stream Selection:
-            // When the DAW runs on an ASIO driver (e.g. Audient USB ASIO, FL Studio ASIO, ASIO4ALL),
-            // the primary Windows eRender endpoint is either silent or only carries background noise,
-            // while the ASIO Loopback ("Loop-back 1/2") or secondary output carries the DAW mix.
-            let primary_peak = peak_abs(out);
-            let mut best_aux_idx: Option<usize> = None;
-            let mut best_aux_peak: f32 = 0.0;
+            // Update primary envelope peak ONLY when primary stream delivered a packet,
+            // or decay if no WASAPI packet arrived for > 50 ms (stream stopped).
+            if !out.is_empty() {
+                self.primary_last_packet = now;
+                let p = peak_abs(out);
+                self.primary_env_peak = if p > self.primary_env_peak {
+                    p
+                } else {
+                    self.primary_env_peak * 0.88 + p * 0.12
+                };
+            } else if now.duration_since(self.primary_last_packet).as_millis() > 50 {
+                self.primary_env_peak *= 0.85;
+                if self.primary_env_peak < 1e-5 {
+                    self.primary_env_peak = 0.0;
+                }
+            }
 
+            // 3. Drain all auxiliary ASIO Loopback & secondary output streams every cycle
+            let pair = self.channel_pair;
+            let mut any_aux_samples = false;
+            for aux in &mut self.aux_streams {
+                aux.buf.clear();
+                aux.stream.drain_stereo(pair, &mut aux.buf);
+                if !aux.buf.is_empty() {
+                    any_aux_samples = true;
+                    aux.last_packet = now;
+                    let p = peak_abs(&aux.buf);
+                    aux.env_peak = if p > aux.env_peak {
+                        p
+                    } else {
+                        aux.env_peak * 0.88 + p * 0.12
+                    };
+                } else if now.duration_since(aux.last_packet).as_millis() > 50 {
+                    aux.env_peak *= 0.85;
+                    if aux.env_peak < 1e-5 {
+                        aux.env_peak = 0.0;
+                    }
+                }
+            }
+
+            if out.is_empty() && !any_aux_samples {
+                return;
+            }
+
+            // 4. Compare smooth packet-aligned envelopes with strong hysteresis (zero flickering):
+            let mut best_aux_idx: Option<usize> = None;
+            let mut best_aux_env: f32 = 0.0;
             for (idx, aux) in self.aux_streams.iter().enumerate() {
-                let p = peak_abs(&aux.buf);
-                if p > best_aux_peak {
-                    best_aux_peak = p;
+                if aux.env_peak > best_aux_env {
+                    best_aux_env = aux.env_peak;
                     best_aux_idx = Some(idx);
                 }
             }
 
-            let now = std::time::Instant::now();
-            let use_aux = if let Some(idx) = best_aux_idx {
-                if best_aux_peak > 1e-5 && (primary_peak <= 1e-4 || best_aux_peak > primary_peak * 1.35) {
+            // Switch to ASIO Loopback / aux stream ONLY when primary Windows output is silent (<= 1e-4)
+            // and the aux stream has real signal (> 1e-4).
+            if let Some(idx) = best_aux_idx {
+                if self.primary_env_peak <= 1e-4 && best_aux_env > 1e-4 {
                     self.active_aux_id = Some(self.aux_streams[idx].id.clone());
                     self.aux_last_signal = now;
-                    Some(idx)
-                } else if primary_peak <= 1e-5 {
-                    if let Some(ref active_id) = self.active_aux_id {
-                        if now.duration_since(self.aux_last_signal).as_millis() < 1800 {
-                            self.aux_streams.iter().position(|a| &a.id == active_id)
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    self.active_aux_id = None;
-                    None
                 }
-            } else {
-                None
-            };
+            }
 
-            if let Some(idx) = use_aux {
-                let aux = &self.aux_streams[idx];
-                out.clear();
-                out.extend_from_slice(&aux.buf);
-                self.sample_rate = aux.stream.sample_rate;
-                self.device_name = aux.name.clone();
-                self.mode = CaptureMode::EndpointLoopback;
-            } else if let Some(ref ep) = self.endpoint_stream {
+            // Switch back to primary ONLY when primary Windows output has sustained signal (> 3e-4)
+            // and at least 1.5 seconds have elapsed since latching onto aux.
+            if self.active_aux_id.is_some()
+                && self.primary_env_peak > 3e-4
+                && now.duration_since(self.aux_last_signal).as_millis() > 1500
+            {
+                self.active_aux_id = None;
+            }
+
+            if let Some(ref active_id) = self.active_aux_id {
+                if let Some(idx) = self.aux_streams.iter().position(|a| &a.id == active_id) {
+                    let aux = &self.aux_streams[idx];
+                    out.clear();
+                    out.extend_from_slice(&aux.buf);
+                    self.sample_rate = aux.stream.sample_rate;
+                    self.device_name = aux.name.clone();
+                    self.mode = CaptureMode::EndpointLoopback;
+                    return;
+                }
+            }
+
+            if let Some(ref ep) = self.endpoint_stream {
                 self.sample_rate = ep.sample_rate;
                 self.device_name = self.primary_device_name.clone();
             }

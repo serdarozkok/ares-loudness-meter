@@ -17,7 +17,7 @@ export const ALL_SECTIONS: readonly SectionId[] = ["cards", "graph", "phase"];
 export const DEFAULT_SETTINGS: Settings = {
   theme: "dark",
   miniBarTextColor: "auto",
-  miniBarMetrics: ["tp", "int", "shrt", "momn", "lra", "psr"],
+  miniBarMetrics: ["tp", "int", "live", "shrt", "momn", "lra", "psr"],
   holdMode: "max",
   showPlr: false,
   target: "spotify",

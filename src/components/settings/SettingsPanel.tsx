@@ -23,6 +23,7 @@ interface Props {
 const ALL_MINI_METRICS: ReadonlyArray<{ id: MiniMetric; label: string }> = [
   { id: "tp", label: "TP (True Peak Max)" },
   { id: "int", label: "INT (Integrated LUFS)" },
+  { id: "live", label: "LIVE (Instant Loudness)" },
   { id: "shrt", label: "SHRT (Short-Term)" },
   { id: "momn", label: "MOMN (Momentary)" },
   { id: "lra", label: "LRA (Loudness Range)" },

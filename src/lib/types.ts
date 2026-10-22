@@ -6,7 +6,7 @@
 
 export type ThemeName = "dark" | "color" | "light";
 export type MiniBarTextColor = "auto" | "white" | "black" | "green" | "orange" | "cyan";
-export type MiniMetric = "tp" | "int" | "shrt" | "momn" | "lra" | "psr" | "plr";
+export type MiniMetric = "tp" | "int" | "live" | "shrt" | "momn" | "lra" | "psr" | "plr";
 export type HoldMode = "max" | "live";
 export type Ballistics = "fast" | "slow";
 export type GraphSpan = 5 | 10 | 30 | 60;

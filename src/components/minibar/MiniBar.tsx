@@ -10,6 +10,7 @@ import { useTelemetry } from "../../state/telemetry";
 const LABELS: Record<MiniMetric, string> = {
   tp: "TP",
   int: "INT",
+  live: "LIVE",
   shrt: "SHRT",
   momn: "MOMN",
   lra: "LRA",
@@ -24,6 +25,8 @@ function readMetric(m: MiniMetric, t: Telemetry | null, holdMax: boolean): numbe
       return t.tpMax;
     case "int":
       return t.integrated;
+    case "live":
+      return t.momentary ?? t.shortTerm;
     case "shrt":
       return holdMax ? t.shortTermMax : t.shortTerm;
     case "momn":

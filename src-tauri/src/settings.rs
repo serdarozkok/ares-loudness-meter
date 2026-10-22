@@ -55,6 +55,7 @@ impl Default for Settings {
             mini_bar_metrics: vec![
                 "tp".into(),
                 "int".into(),
+                "live".into(),
                 "shrt".into(),
                 "momn".into(),
                 "lra".into(),
@@ -119,6 +120,19 @@ pub fn load_settings() -> Settings {
         } else {
             s.card_order.push("instantLufs".to_string());
         }
+    }
+    if !s.mini_bar_metrics.iter().any(|m| m == "live")
+        && s.mini_bar_metrics
+            == vec![
+                "tp".to_string(),
+                "int".to_string(),
+                "shrt".to_string(),
+                "momn".to_string(),
+                "lra".to_string(),
+                "psr".to_string(),
+            ]
+    {
+        s.mini_bar_metrics.insert(2, "live".to_string());
     }
     s
 }
