@@ -189,6 +189,7 @@ fn spawn_audio_dsp_engine(
                 settings.silence_reset,
             );
             let mut alerts = AlertEngine::new();
+            #[cfg(windows)]
             let mut stereo_buf: Vec<f32> = Vec::with_capacity(4096);
             let mut last_emit = Instant::now();
             let mut last_status_sig = String::new();

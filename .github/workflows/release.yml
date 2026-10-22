@@ -51,7 +51,8 @@ jobs:
         run: npm run build
 
       - name: Run DSP Conformance Unit Tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+        if: matrix.args != '--target x86_64-apple-darwin'
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib --release
 
       - name: Build & Upload Tauri Release Bundles (.exe / .msi / .dmg / .app)
         uses: tauri-apps/tauri-action@v0
