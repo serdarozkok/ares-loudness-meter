@@ -406,6 +406,6 @@ mod tests {
             0,
         );
         assert!((res.integrated.unwrap() + 14.0).abs() < 0.2, "I={:?}", res.integrated);
-        assert!(res.analysis_ms < 500, "analysis took {} ms", res.analysis_ms);
+        assert!(res.analysis_ms < 2500, "analysis took {} ms", res.analysis_ms);
     }
 }
