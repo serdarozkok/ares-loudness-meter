@@ -107,16 +107,18 @@ mod win_impl {
         CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO, BITMAPINFOHEADER,
         BI_RGB, DIB_RGB_COLORS,
     };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
     use windows::Win32::Media::Audio::{
-        ActivateAudioInterfaceAsync, eConsole, eRender, AudioSessionStateActive, IActivateAudioInterfaceAsyncOperation,
-        IActivateAudioInterfaceCompletionHandler, IActivateAudioInterfaceCompletionHandler_Impl, IAudioCaptureClient,
-        IAudioClient, IAudioSessionControl2, IAudioSessionManager2, IMMDevice,
-        IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
-        AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_LOOPBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-        AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
-        AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS, DEVICE_STATE_ACTIVE, PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE,
-        PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE, VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, WAVEFORMATEX,
-        WAVEFORMATEXTENSIBLE,
+        ActivateAudioInterfaceAsync, eCapture, eConsole, eRender, AudioSessionStateActive,
+        IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
+        IActivateAudioInterfaceCompletionHandler_Impl, IAudioCaptureClient, IAudioClient, IAudioSessionControl2,
+        IAudioSessionManager2, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT,
+        AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_LOOPBACK,
+        AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, AUDIOCLIENT_ACTIVATION_PARAMS,
+        AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS, DEVICE_STATE_ACTIVE,
+        PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE, PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+        VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
     };
     use windows::Win32::Media::KernelStreaming::WAVE_FORMAT_EXTENSIBLE;
     use windows::Win32::Media::Multimedia::KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
@@ -132,6 +134,18 @@ mod win_impl {
 
     const WAVE_FORMAT_IEEE_FLOAT_TAG: u16 = 3;
     const WAVE_FORMAT_PCM_TAG: u16 = 1;
+
+    pub fn is_asio_or_hardware_loopback_name(name: &str) -> bool {
+        let lower = name.to_ascii_lowercase();
+        lower.contains("loop-back")
+            || lower.contains("loopback")
+            || lower.contains("stereo mix")
+            || lower.contains("what u hear")
+            || lower.contains("wave out")
+            || lower.contains("soundgrid")
+            || lower.contains("voicemeeter")
+            || lower.contains("cable output")
+    }
 
     pub struct ComGuard;
     impl ComGuard {
@@ -190,27 +204,56 @@ mod win_impl {
                 .ok()
                 .and_then(|d| device_id_string(&d));
 
-            let Ok(collection) = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) else {
-                return out;
-            };
-            let count = collection.GetCount().unwrap_or(0);
-            for i in 0..count {
-                if let Ok(dev) = collection.Item(i) {
-                    let Some(id) = device_id_string(&dev) else { continue };
-                    let name = device_friendly_name(&dev);
-                    let (channels, sample_rate) = device_mix_format(&dev);
-                    let is_default = default_id.as_deref() == Some(id.as_str());
-                    out.push(DeviceInfo {
-                        id,
-                        name,
-                        channels,
-                        sample_rate,
-                        is_default,
-                    });
+            // 1. Active eRender (Output Loopback) endpoints
+            if let Ok(collection) = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) {
+                let count = collection.GetCount().unwrap_or(0);
+                for i in 0..count {
+                    if let Ok(dev) = collection.Item(i) {
+                        let Some(id) = device_id_string(&dev) else { continue };
+                        let name = device_friendly_name(&dev);
+                        let (channels, sample_rate) = device_mix_format(&dev);
+                        let is_default = default_id.as_deref() == Some(id.as_str());
+                        out.push(DeviceInfo {
+                            id,
+                            name,
+                            channels,
+                            sample_rate,
+                            is_default,
+                        });
+                    }
+                }
+            }
+
+            // 2. Active eCapture (Hardware ASIO Loopback & Audio Interface Capture) endpoints
+            if let Ok(collection) = enumerator.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE) {
+                let count = collection.GetCount().unwrap_or(0);
+                for i in 0..count {
+                    if let Ok(dev) = collection.Item(i) {
+                        let Some(id) = device_id_string(&dev) else { continue };
+                        let raw_name = device_friendly_name(&dev);
+                        let (channels, sample_rate) = device_mix_format(&dev);
+                        let is_loopback = is_asio_or_hardware_loopback_name(&raw_name);
+                        let label = if is_loopback {
+                            format!("{raw_name} [ASIO Loopback]")
+                        } else {
+                            format!("{raw_name} [Input / Capture]")
+                        };
+                        out.push(DeviceInfo {
+                            id,
+                            name: label,
+                            channels,
+                            sample_rate,
+                            is_default: false,
+                        });
+                    }
                 }
             }
         }
-        out.sort_by_key(|d| (!d.is_default, d.name.clone()));
+        out.sort_by_key(|d| {
+            let is_asio_lb = d.name.contains("[ASIO Loopback]");
+            let is_input = d.name.contains("[Input / Capture]");
+            (!d.is_default, !is_asio_lb, is_input, d.name.clone())
+        });
         out
     }
 
@@ -426,6 +469,33 @@ mod win_impl {
         pub channels: usize,
         pub sample_rate: u32,
         pub format: SampleFormat,
+        pub invalidated: AtomicBool,
+    }
+
+    static AUDIENT_CHECKED: AtomicBool = AtomicBool::new(false);
+
+    fn ensure_audient_dsp_active() {
+        if AUDIENT_CHECKED.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let id_exe = Path::new(r"C:\Program Files\Audient\iD\iD.exe");
+        if !id_exe.exists() {
+            return;
+        }
+        // Check if iD.exe is already running; if not, start it in the background
+        // (state.xml has window-open="0" so it initializes the Audient iD14 hardware
+        // loopback mux silently in the system tray).
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let running = std::process::Command::new("tasklist")
+            .creation_flags(CREATE_NO_WINDOW)
+            .args(["/FI", "IMAGENAME eq iD.exe", "/NH"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_ascii_lowercase().contains("id.exe"))
+            .unwrap_or(true);
+        if !running {
+            let _ = std::process::Command::new(id_exe).spawn();
+        }
     }
 
     unsafe fn parse_wave_format(fmt_ptr: *const WAVEFORMATEX) -> Option<(usize, u32, SampleFormat)> {
@@ -475,7 +545,7 @@ mod win_impl {
             enumerator
                 .GetDevice(PCWSTR(wide.as_ptr()))
                 .or_else(|_| enumerator.GetDefaultAudioEndpoint(eRender, eConsole))
-                .map_err(|e| format!("No active audio output endpoint: {e}"))?
+                .map_err(|e| format!("No active audio endpoint: {e}"))?
         } else {
             enumerator
                 .GetDefaultAudioEndpoint(eRender, eConsole)
@@ -483,7 +553,27 @@ mod win_impl {
         };
 
         let resolved_id = device_id_string(&dev).unwrap_or_default();
-        let name = device_friendly_name(&dev);
+        let is_capture_endpoint = resolved_id.starts_with("{0.0.1.");
+        let raw_name = device_friendly_name(&dev);
+        let is_hw_loopback = is_capture_endpoint && is_asio_or_hardware_loopback_name(&raw_name);
+
+        if is_hw_loopback {
+            if raw_name.to_ascii_lowercase().contains("audient") {
+                ensure_audient_dsp_active();
+            }
+            // Ensure Windows has not muted or attenuated the hardware ASIO loopback endpoint.
+            if let Ok(ep_vol) = dev.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None) {
+                let _ = ep_vol.SetMute(false, std::ptr::null());
+                let _ = ep_vol.SetMasterVolumeLevelScalar(1.0, std::ptr::null());
+            }
+        }
+
+        let name = if is_hw_loopback {
+            format!("{raw_name} [ASIO]")
+        } else {
+            raw_name
+        };
+
         let client: IAudioClient = dev
             .Activate(CLSCTX_ALL, None)
             .map_err(|e| format!("IAudioClient::Activate failed: {e}"))?;
@@ -497,14 +587,32 @@ mod win_impl {
         };
 
         let hns_buffer_duration: i64 = 250_000;
+        let base_flags = if is_capture_endpoint {
+            0u32
+        } else {
+            AUDCLNT_STREAMFLAGS_LOOPBACK
+        };
+
         let init_res = client.Initialize(
             AUDCLNT_SHAREMODE_SHARED,
-            AUDCLNT_STREAMFLAGS_LOOPBACK,
+            base_flags,
             hns_buffer_duration,
             0,
             fmt_ptr,
             None,
         );
+        let init_res = if init_res.is_err() {
+            client.Initialize(
+                AUDCLNT_SHAREMODE_SHARED,
+                base_flags | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+                hns_buffer_duration,
+                0,
+                fmt_ptr,
+                None,
+            )
+        } else {
+            init_res
+        };
         CoTaskMemFree(Some(fmt_ptr as *const _));
         init_res.map_err(|e| format!("IAudioClient::Initialize failed: {e}"))?;
 
@@ -520,6 +628,7 @@ mod win_impl {
                 channels,
                 sample_rate,
                 format,
+                invalidated: AtomicBool::new(false),
             },
             resolved_id,
             name,
@@ -643,16 +752,28 @@ mod win_impl {
             channels: 2,
             sample_rate,
             format: SampleFormat::Float32,
+            invalidated: AtomicBool::new(false),
         })
     }
 
     impl ActiveCaptureStream {
+        pub fn is_invalidated(&self) -> bool {
+            self.invalidated.load(Ordering::Relaxed)
+        }
+
         pub unsafe fn drain_stereo(&self, pair_idx: usize, out: &mut Vec<f32>) {
             let ch = self.channels.max(1);
             let c_l = (pair_idx * 2).min(ch - 1);
             let c_r = (pair_idx * 2 + 1).min(ch - 1);
 
-            while let Ok(packet_frames) = self.capture.GetNextPacketSize() {
+            loop {
+                let packet_frames = match self.capture.GetNextPacketSize() {
+                    Ok(n) => n,
+                    Err(_) => {
+                        self.invalidated.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                };
                 if packet_frames == 0 {
                     break;
                 }
@@ -664,6 +785,7 @@ mod win_impl {
                     .GetBuffer(&mut data_ptr, &mut frames_to_read, &mut flags, None, None)
                     .is_err()
                 {
+                    self.invalidated.store(true, Ordering::Relaxed);
                     break;
                 }
                 let n = frames_to_read as usize;
@@ -749,17 +871,30 @@ pub fn enumerate_audio_sessions() -> Vec<AudioSessionInfo> {
     Vec::new()
 }
 
-/// Manages active WASAPI / Process Loopback / ASIO IPC streams on Windows.
+#[cfg(windows)]
+struct AuxCaptureEntry {
+    id: String,
+    name: String,
+    is_asio_loopback: bool,
+    stream: win_impl::ActiveCaptureStream,
+    buf: Vec<f32>,
+}
+
+/// Manages active WASAPI / ASIO Hardware Loopback / Process Loopback / ASIO IPC streams on Windows.
 #[cfg(windows)]
 pub struct AudioCaptureController {
     _com: win_impl::ComGuard,
     input_source: String,
     desired_device_id: Option<String>,
     resolved_device_id: String,
+    primary_device_name: String,
     device_name: String,
     channel_pair: usize,
     ignored_apps: HashSet<String>,
     endpoint_stream: Option<win_impl::ActiveCaptureStream>,
+    aux_streams: Vec<AuxCaptureEntry>,
+    active_aux_id: Option<String>,
+    aux_last_signal: std::time::Instant,
     direct_exclude_stream: Option<(u32, win_impl::ActiveCaptureStream)>,
     excluded_pid_streams: HashMap<u32, win_impl::ActiveCaptureStream>,
     ipc_reader: Option<IpcBridgeReader>,
@@ -768,6 +903,19 @@ pub struct AudioCaptureController {
     status_msg: Option<String>,
     last_check: std::time::Instant,
     scratch_sub: Vec<f32>,
+    scratch_ipc: Vec<f32>,
+}
+
+#[cfg(windows)]
+fn peak_abs(samples: &[f32]) -> f32 {
+    let mut m = 0.0f32;
+    for &s in samples {
+        let a = s.abs();
+        if a > m {
+            m = a;
+        }
+    }
+    m
 }
 
 #[cfg(windows)]
@@ -783,10 +931,14 @@ impl AudioCaptureController {
             input_source,
             desired_device_id: device_id,
             resolved_device_id: String::new(),
+            primary_device_name: "Default Audio Output".to_string(),
             device_name: "Default Audio Output".to_string(),
             channel_pair,
             ignored_apps: ignored_apps.into_iter().map(|s| s.to_ascii_lowercase()).collect(),
             endpoint_stream: None,
+            aux_streams: Vec::new(),
+            active_aux_id: None,
+            aux_last_signal: std::time::Instant::now(),
             direct_exclude_stream: None,
             excluded_pid_streams: HashMap::new(),
             ipc_reader: None,
@@ -795,6 +947,7 @@ impl AudioCaptureController {
             status_msg: None,
             last_check: std::time::Instant::now(),
             scratch_sub: Vec::with_capacity(4096),
+            scratch_ipc: Vec::with_capacity(4096),
         };
         ctrl.reconfigure();
         ctrl
@@ -820,23 +973,21 @@ impl AudioCaptureController {
 
     pub fn reconfigure(&mut self) {
         self.endpoint_stream = None;
+        self.aux_streams.clear();
+        self.active_aux_id = None;
         self.direct_exclude_stream = None;
         self.excluded_pid_streams.clear();
-        self.ipc_reader = None;
+        self.ipc_reader = IpcBridgeReader::open_or_create().ok();
         self.status_msg = None;
 
         if self.input_source.eq_ignore_ascii_case("ipc") {
-            match IpcBridgeReader::open_or_create() {
-                Ok(reader) => {
-                    self.sample_rate = reader.sample_rate();
-                    self.device_name = "ASIO IPC Bridge (Local\\LoudmeterIPCBuffer)".to_string();
-                    self.mode = CaptureMode::IpcBridge;
-                    self.ipc_reader = Some(reader);
-                }
-                Err(e) => {
-                    self.mode = CaptureMode::None;
-                    self.status_msg = Some(e);
-                }
+            if let Some(ref reader) = self.ipc_reader {
+                self.sample_rate = reader.sample_rate();
+                self.device_name = "ASIO IPC Bridge (Local\\LoudmeterIPCBuffer)".to_string();
+                self.mode = CaptureMode::IpcBridge;
+            } else {
+                self.mode = CaptureMode::None;
+                self.status_msg = Some("Could not open Local\\LoudmeterIPCBuffer".to_string());
             }
             return;
         }
@@ -846,6 +997,7 @@ impl AudioCaptureController {
                 Ok((stream, resolved_id, name)) => {
                     self.sample_rate = stream.sample_rate;
                     self.resolved_device_id = resolved_id;
+                    self.primary_device_name = name.clone();
                     self.device_name = name;
                     self.mode = CaptureMode::EndpointLoopback;
                     self.endpoint_stream = Some(stream);
@@ -853,8 +1005,42 @@ impl AudioCaptureController {
                 Err(e) => {
                     self.mode = CaptureMode::None;
                     self.status_msg = Some(e);
-                    return;
                 }
+            }
+
+            // Also open all active ASIO / Hardware Loopback eCapture endpoints (e.g. "Loop-back 1/2 (2- Audient iD14)")
+            // and secondary eRender output endpoints so when a DAW runs in ASIO mode (Audient ASIO, FL Studio ASIO,
+            // ASIO4ALL, etc.), its signal is automatically detected and measured without manual switching.
+            let explicit_capture_selected = self
+                .desired_device_id
+                .as_ref()
+                .map(|id| id.starts_with("{0.0.1."))
+                .unwrap_or(false);
+
+            if !explicit_capture_selected {
+                let all_devs = list_output_devices();
+                for dev in all_devs {
+                    if dev.id == self.resolved_device_id {
+                        continue;
+                    }
+                    let is_capture = dev.id.starts_with("{0.0.1.");
+                    let is_asio_lb = is_capture && dev.name.contains("[ASIO Loopback]");
+                    // Monitor all ASIO/Hardware Loopback eCapture endpoints + all active eRender outputs
+                    if !is_asio_lb && is_capture {
+                        continue;
+                    }
+                    if let Ok((stream, id, clean_name)) = win_impl::open_endpoint_loopback(Some(&dev.id)) {
+                        self.aux_streams.push(AuxCaptureEntry {
+                            id,
+                            name: clean_name,
+                            is_asio_loopback: is_asio_lb,
+                            stream,
+                            buf: Vec::with_capacity(4096),
+                        });
+                    }
+                }
+                // Prioritize Hardware ASIO Loopback streams first
+                self.aux_streams.sort_by_key(|a| !a.is_asio_loopback);
             }
         }
 
@@ -925,7 +1111,7 @@ impl AudioCaptureController {
     }
 
     pub fn periodic_maintenance(&mut self) {
-        if self.last_check.elapsed().as_millis() < 1500 {
+        if self.last_check.elapsed().as_millis() < 450 {
             return;
         }
         self.last_check = std::time::Instant::now();
@@ -937,6 +1123,18 @@ impl AudioCaptureController {
             return;
         }
 
+        let primary_invalid = self
+            .endpoint_stream
+            .as_ref()
+            .map(|s| s.is_invalidated())
+            .unwrap_or(true);
+        let aux_invalid = self.aux_streams.iter().any(|a| a.stream.is_invalidated());
+
+        if primary_invalid || aux_invalid {
+            self.reconfigure();
+            return;
+        }
+
         let devices = list_output_devices();
         let target_dev = if let Some(ref wanted) = self.desired_device_id {
             devices.iter().find(|d| &d.id == wanted)
@@ -945,7 +1143,8 @@ impl AudioCaptureController {
         };
 
         if let Some(dev) = target_dev {
-            if dev.id != self.resolved_device_id || dev.sample_rate != self.sample_rate || self.endpoint_stream.is_none() {
+            let primary_sr = self.endpoint_stream.as_ref().map(|s| s.sample_rate).unwrap_or(0);
+            if dev.id != self.resolved_device_id || (primary_sr > 0 && dev.sample_rate != primary_sr) {
                 self.reconfigure();
                 return;
             }
@@ -958,26 +1157,47 @@ impl AudioCaptureController {
 
     pub fn read_stereo(&mut self, out: &mut Vec<f32>) {
         out.clear();
-        if let Some(ref mut ipc) = self.ipc_reader {
-            self.sample_rate = ipc.sample_rate();
-            ipc.read_available(out);
+        if self.input_source.eq_ignore_ascii_case("ipc") {
+            if let Some(ref mut ipc) = self.ipc_reader {
+                self.sample_rate = ipc.sample_rate();
+                ipc.read_available(out);
+            }
             return;
         }
 
+        // 0. Check automatic background IPC bridge (e.g. if user placed VST3 bridge in DAW)
+        self.scratch_ipc.clear();
+        if let Some(ref mut ipc) = self.ipc_reader {
+            ipc.read_available(&mut self.scratch_ipc);
+            if peak_abs(&self.scratch_ipc) > 1e-6 {
+                self.sample_rate = ipc.sample_rate();
+                self.device_name = "ASIO Bridge (DAW)".to_string();
+                self.mode = CaptureMode::IpcBridge;
+                out.extend_from_slice(&self.scratch_ipc);
+                return;
+            }
+        }
+
         unsafe {
+            // 1. Drain primary endpoint stream
             if let Some((_, ref direct)) = self.direct_exclude_stream {
                 if let Some(ref ep) = self.endpoint_stream {
                     self.scratch_sub.clear();
                     ep.drain_stereo(self.channel_pair, &mut self.scratch_sub);
                 }
                 direct.drain_stereo(0, out);
-                return;
-            }
-
-            if let Some(ref ep) = self.endpoint_stream {
+            } else if let Some(ref ep) = self.endpoint_stream {
                 ep.drain_stereo(self.channel_pair, out);
             }
 
+            // 2. Drain all auxiliary ASIO Loopback & secondary output streams every cycle
+            let pair = self.channel_pair;
+            for aux in &mut self.aux_streams {
+                aux.buf.clear();
+                aux.stream.drain_stereo(pair, &mut aux.buf);
+            }
+
+            // 3. Subtract any ignored app streams from primary out
             if !self.excluded_pid_streams.is_empty() && !out.is_empty() {
                 for stream in self.excluded_pid_streams.values() {
                     self.scratch_sub.clear();
@@ -987,6 +1207,58 @@ impl AudioCaptureController {
                         out[i] = (out[i] - self.scratch_sub[i]).clamp(-2.0, 2.0);
                     }
                 }
+            }
+
+            // 4. Smart ASIO / Active Stream Selection:
+            // When the DAW runs on an ASIO driver (e.g. Audient USB ASIO, FL Studio ASIO, ASIO4ALL),
+            // the primary Windows eRender endpoint is either silent or only carries background noise,
+            // while the ASIO Loopback ("Loop-back 1/2") or secondary output carries the DAW mix.
+            let primary_peak = peak_abs(out);
+            let mut best_aux_idx: Option<usize> = None;
+            let mut best_aux_peak: f32 = 0.0;
+
+            for (idx, aux) in self.aux_streams.iter().enumerate() {
+                let p = peak_abs(&aux.buf);
+                if p > best_aux_peak {
+                    best_aux_peak = p;
+                    best_aux_idx = Some(idx);
+                }
+            }
+
+            let now = std::time::Instant::now();
+            let use_aux = if let Some(idx) = best_aux_idx {
+                if best_aux_peak > 1e-5 && (primary_peak <= 1e-4 || best_aux_peak > primary_peak * 1.35) {
+                    self.active_aux_id = Some(self.aux_streams[idx].id.clone());
+                    self.aux_last_signal = now;
+                    Some(idx)
+                } else if primary_peak <= 1e-5 {
+                    if let Some(ref active_id) = self.active_aux_id {
+                        if now.duration_since(self.aux_last_signal).as_millis() < 1800 {
+                            self.aux_streams.iter().position(|a| &a.id == active_id)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    self.active_aux_id = None;
+                    None
+                }
+            } else {
+                None
+            };
+
+            if let Some(idx) = use_aux {
+                let aux = &self.aux_streams[idx];
+                out.clear();
+                out.extend_from_slice(&aux.buf);
+                self.sample_rate = aux.stream.sample_rate;
+                self.device_name = aux.name.clone();
+                self.mode = CaptureMode::EndpointLoopback;
+            } else if let Some(ref ep) = self.endpoint_stream {
+                self.sample_rate = ep.sample_rate;
+                self.device_name = self.primary_device_name.clone();
             }
         }
     }
@@ -1000,3 +1272,4 @@ impl AudioCaptureController {
         }
     }
 }
+

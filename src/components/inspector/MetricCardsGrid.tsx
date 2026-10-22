@@ -189,6 +189,72 @@ export function MetricCardsGrid({ settings, telemetry }: Props) {
         );
       }
 
+      case "instantLufs": {
+        const momLive = telemetry?.momentary ?? null;
+        const shrtLive = telemetry?.shortTerm ?? null;
+        const liveVal = momLive ?? shrtLive;
+        const liveDelta = liveVal !== null ? liveVal - tgtLufs : null;
+        const momPct = momLive !== null ? clamp01((momLive + 40) / 40) * 100 : 0;
+        const shrtPct = shrtLive !== null ? clamp01((shrtLive + 40) / 40) * 100 : 0;
+        const tgtPct = clamp01((tgtLufs + 40) / 40) * 100;
+        return (
+          <SortableCard key={id} id={id} fullWidth>
+            <div className="flex items-center justify-between pr-5">
+              <div className="flex items-center gap-1.5">
+                <span
+                  className={`inline-block h-1.5 w-1.5 rounded-full transition-colors ${
+                    active ? "bg-graph shadow-[0_0_6px_rgba(16,185,129,0.8)]" : "bg-inactive"
+                  }`}
+                />
+                <span className="text-[10px] font-bold tracking-wider text-muted uppercase">
+                  INSTANT LOUDNESS (LIVE)
+                </span>
+              </div>
+              <span className="num rounded-full bg-surface2 px-2 py-0.5 text-[10px] font-semibold text-muted">
+                SHRT 3s:{" "}
+                <strong className={active ? "text-fg" : "text-inactive"}>{fmtLufs(shrtLive)}</strong> LUFS
+              </span>
+            </div>
+            <div className="mt-1 flex items-baseline justify-between">
+              <div className="flex items-baseline gap-1.5">
+                <span
+                  className={`num text-[26px] leading-none font-extrabold transition-colors duration-150 ${
+                    active ? "text-graph" : "text-inactive"
+                  }`}
+                >
+                  {fmtLufs(momLive)}
+                </span>
+                <span className="text-xs font-semibold text-muted">LUFS</span>
+                <span className="ml-1 text-[10px] text-muted/70">(400 ms live)</span>
+              </div>
+              {liveDelta !== null && (
+                <span className="num text-[11px] font-semibold text-muted">
+                  {fmtDelta(liveDelta)} vs {tgtName}
+                </span>
+              )}
+            </div>
+            <div className="relative mt-2.5 h-2 w-full overflow-hidden rounded-full bg-surface2">
+              <div
+                style={{ width: `${momPct}%` }}
+                className="h-full rounded-full bg-graph transition-all duration-75"
+              />
+              {shrtLive !== null && (
+                <div
+                  style={{ left: `${shrtPct}%` }}
+                  title={`Short-Term Live: ${shrtLive.toFixed(1)} LUFS`}
+                  className="absolute top-0 bottom-0 w-[2px] bg-lufs"
+                />
+              )}
+              <div
+                style={{ left: `${tgtPct}%` }}
+                title={`Target ${tgtLufs.toFixed(1)} LUFS`}
+                className="absolute top-0 bottom-0 w-[2px] bg-fg/75"
+              />
+            </div>
+          </SortableCard>
+        );
+      }
+
       case "shortTerm": {
         const val = holdMax ? telemetry?.shortTermMax ?? null : telemetry?.shortTerm ?? null;
         return (

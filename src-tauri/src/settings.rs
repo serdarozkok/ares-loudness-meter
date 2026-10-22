@@ -76,6 +76,7 @@ impl Default for Settings {
             card_order: vec![
                 "truePeak".into(),
                 "integrated".into(),
+                "instantLufs".into(),
                 "shortTerm".into(),
                 "momentary".into(),
                 "lra".into(),
@@ -108,10 +109,18 @@ fn config_path() -> PathBuf {
 
 pub fn load_settings() -> Settings {
     let path = config_path();
-    fs::read_to_string(&path)
+    let mut s = fs::read_to_string(&path)
         .ok()
-        .and_then(|s| serde_json::from_str::<Settings>(&s).ok())
-        .unwrap_or_default()
+        .and_then(|raw| serde_json::from_str::<Settings>(&raw).ok())
+        .unwrap_or_default();
+    if !s.card_order.iter().any(|c| c == "instantLufs") {
+        if let Some(pos) = s.card_order.iter().position(|c| c == "integrated") {
+            s.card_order.insert(pos + 1, "instantLufs".to_string());
+        } else {
+            s.card_order.push("instantLufs".to_string());
+        }
+    }
+    s
 }
 
 pub fn save_settings(s: &Settings) {

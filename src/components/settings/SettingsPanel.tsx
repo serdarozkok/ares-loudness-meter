@@ -162,7 +162,7 @@ export function SettingsPanel({ settings, onClose }: Props) {
           <div className="grid grid-cols-2 gap-1.5">
             {(
               [
-                { id: "wasapi", label: "WASAPI Loopback" },
+                { id: "wasapi", label: "WASAPI + ASIO Loopback" },
                 { id: "ipc", label: "ASIO IPC Bridge" },
               ] as const
             ).map((src) => (
@@ -185,7 +185,7 @@ export function SettingsPanel({ settings, onClose }: Props) {
             <>
               <div>
                 <label className="block text-[10px] font-semibold text-muted uppercase">
-                  Output Endpoint
+                  Audio Endpoint (Output &amp; ASIO Loopback)
                 </label>
                 <select
                   value={settings.deviceId ?? ""}
@@ -197,7 +197,7 @@ export function SettingsPanel({ settings, onClose }: Props) {
                   }
                   className="mt-1 w-full rounded-lg border border-line bg-surface2 px-2.5 py-1.5 text-xs text-fg outline-none"
                 >
-                  <option value="">Automatic (Follow Default Windows Output)</option>
+                  <option value="">Automatic (Follow Active Output &amp; ASIO Loopback)</option>
                   {devices.map((d) => (
                     <option key={d.id} value={d.id}>
                       {d.name} ({(d.sampleRate / 1000).toFixed(1)} kHz · {d.channels}ch)

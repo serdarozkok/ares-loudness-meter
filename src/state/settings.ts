@@ -3,7 +3,15 @@ import { api, events } from "../lib/ipc";
 import { isTauri } from "../lib/env";
 import type { CardId, SectionId, Settings } from "../lib/types";
 
-export const ALL_CARDS: readonly CardId[] = ["truePeak", "integrated", "shortTerm", "momentary", "lra", "psr"];
+export const ALL_CARDS: readonly CardId[] = [
+  "truePeak",
+  "integrated",
+  "instantLufs",
+  "shortTerm",
+  "momentary",
+  "lra",
+  "psr",
+];
 export const ALL_SECTIONS: readonly SectionId[] = ["cards", "graph", "phase"];
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -38,7 +46,20 @@ function normalizeOrder<T extends string>(order: readonly T[] | undefined, all: 
       out.push(id);
     }
   }
-  for (const id of all) if (!seen.has(id)) out.push(id);
+  for (let i = 0; i < all.length; i++) {
+    const id = all[i];
+    if (!seen.has(id)) {
+      seen.add(id);
+      if (i > 0) {
+        const prevIdx = out.indexOf(all[i - 1]);
+        if (prevIdx >= 0) {
+          out.splice(prevIdx + 1, 0, id);
+          continue;
+        }
+      }
+      out.push(id);
+    }
+  }
   return out;
 }
 

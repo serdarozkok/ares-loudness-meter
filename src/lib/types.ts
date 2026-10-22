@@ -13,7 +13,7 @@ export type GraphSpan = 5 | 10 | 30 | 60;
 export type SilenceReset = 0 | 3 | 5 | 10 | 30; // 0 = never
 export type InputSource = "wasapi" | "ipc";
 export type TargetId = "spotify" | "apple" | "youtube" | "ebu" | "netflix" | "custom";
-export type CardId = "truePeak" | "integrated" | "shortTerm" | "momentary" | "lra" | "psr";
+export type CardId = "truePeak" | "integrated" | "instantLufs" | "shortTerm" | "momentary" | "lra" | "psr";
 export type SectionId = "cards" | "graph" | "phase";
 
 export interface AlertSettings {
