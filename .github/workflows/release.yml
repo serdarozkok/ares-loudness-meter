@@ -1,0 +1,71 @@
+name: Build & Release (Windows + macOS)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            args: ""
+          - platform: macos-latest
+            args: "--target aarch64-apple-darwin"
+          - platform: macos-latest
+            args: "--target x86_64-apple-darwin"
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: "npm"
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run DSP Conformance Unit Tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+
+      - name: Build & Upload Tauri Release Bundles (.exe / .msi / .dmg / .app)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__
+          releaseName: "ARES Loudness Meter v__VERSION__"
+          releaseBody: |
+            ## ARES Loudness Meter v__VERSION__ (Windows 10/11 & macOS)
+            - **ITU-R BS.1770-5 & EBU R128 / Tech 3341-3342** Real-Time Loudness Metering (`Integrated`, `Short-Term`, `Momentary`, `LRA`, `PSR`, `PLR`)
+            - **Inter-Sample True Peak (`dBTP`)** via 8x/4x Polyphase Kaiser-Sinc FIR Oversampling
+            - **Stereo & 31-Band Spectral Phase Correlation** (`20 Hz` – `20 kHz`)
+            - **Two-Window Architecture**: Always-on-Top Magnetic Mini-Bar Pill + Pinnable Main Inspector Panel
+            - **Per-Application Audio Exclusion ("Ignore Apps")** & **ASIO Shared-Memory DAW Bridge**
+            - **Multithreaded Offline Audio Analyzer** (`WAV`, `MP3`, `FLAC`, `AIFF`, `M4A`) & **High-DPI Session Report PNG Export**
+            - **Zero-Install 60fps Mobile LAN Mirror** (iPhone / iPad / Android via QR Code)
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}
