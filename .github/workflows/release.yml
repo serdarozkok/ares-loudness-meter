@@ -47,6 +47,9 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Build frontend assets (dist/)
+        run: npm run build
+
       - name: Run DSP Conformance Unit Tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib
 

@@ -13,7 +13,9 @@ use crate::dsp::CaptureMode;
 use crate::ipc_bridge::IpcBridgeReader;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+#[cfg(windows)]
+use std::collections::HashSet;
 use std::sync::OnceLock;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

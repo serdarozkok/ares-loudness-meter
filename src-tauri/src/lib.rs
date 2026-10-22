@@ -189,7 +189,7 @@ fn spawn_audio_dsp_engine(
                 settings.silence_reset,
             );
             let mut alerts = AlertEngine::new();
-            let mut stereo_buf = Vec::with_capacity(4096);
+            let mut stereo_buf: Vec<f32> = Vec::with_capacity(4096);
             let mut last_emit = Instant::now();
             let mut last_status_sig = String::new();
             let emit_interval = Duration::from_micros(16_667); // 60 fps
@@ -238,7 +238,7 @@ fn spawn_audio_dsp_engine(
                     #[cfg(not(windows))]
                     let st = CaptureStatus {
                         mode: CaptureMode::None,
-                        device_name: "Unsupported OS".into(),
+                        device_name: "CoreAudio / System Audio".into(),
                         sample_rate: 48_000,
                         message: None,
                     };

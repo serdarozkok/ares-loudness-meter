@@ -14,7 +14,9 @@
 //!  * `0x18`: `reserved`    (`u64` padding to 32-byte header)
 //!  * `0x20`: `samples`     (`[f32; 16384 * 2]` interleaved stereo ring)
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64};
+#[cfg(windows)]
+use std::sync::atomic::Ordering;
 
 pub const IPC_MAP_NAME: &str = "Local\\LoudmeterIPCBuffer\0";
 pub const IPC_MAGIC: u32 = 0x4C4D_5052; // "LMPR"
