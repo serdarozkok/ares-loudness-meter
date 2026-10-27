@@ -952,8 +952,8 @@ mod mac_impl {
         }
 
         out.sort_by_key(|d| device_priority(&d.name, d.channels, d.is_default));
-        if let Some(first) = out.first_mut() {
-            if !out.iter().any(|d| d.is_default) {
+        if !out.iter().any(|d| d.is_default) {
+            if let Some(first) = out.first_mut() {
                 first.is_default = true;
             }
         }
