@@ -3,6 +3,8 @@
 /* ───────────────────────── Theme tokens ───────────────────────── */
 :root,
 html[data-theme="dark"] {
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Inter", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Monaco, Consolas, ui-monospace, monospace;
   --lm-bg: #111215;
   --lm-bg-grad: linear-gradient(180deg, #131418 0%, #0f1013 100%);
   --lm-surface: #1a1c20;
@@ -85,8 +87,8 @@ html[data-theme="light"] {
   --color-warn: var(--lm-warn);
   --color-amber: var(--lm-amber);
   --color-good: var(--lm-good);
-  --font-sans: "Inter", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", "Cascadia Mono", Consolas, ui-monospace, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Inter", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Monaco, Consolas, ui-monospace, monospace;
 }
 
 /* ───────────────────────── Base ───────────────────────── */

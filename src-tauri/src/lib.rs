@@ -10,9 +10,7 @@ pub mod lan_server;
 pub mod settings;
 
 use alerts::AlertEngine;
-#[cfg(windows)]
-use audio_capture::AudioCaptureController;
-use audio_capture::CaptureStatus;
+use audio_capture::{AudioCaptureController, CaptureStatus};
 use commands::{AppState, EngineCommand};
 use crossbeam_channel::unbounded;
 use dsp::{CaptureMode, DspProcessor};
@@ -138,7 +136,8 @@ fn spawn_minibar_window(app: AppHandle) {
                 let mp = mon.position();
                 let ms = mon.size();
                 let x = mp.x + (ms.width as i32 - size.width as i32) / 2;
-                let y = mp.y + 4;
+                let top_offset = if cfg!(target_os = "macos") { 30 } else { 4 };
+                let y = mp.y + top_offset;
                 let _ = mini.set_position(PhysicalPosition::new(x, y));
             }
         }
@@ -170,17 +169,13 @@ fn spawn_audio_dsp_engine(
             elevate_audio_thread_priority();
 
             let mut settings = initial_settings;
-            #[cfg(windows)]
             let mut capture = AudioCaptureController::new(
                 settings.input_source.clone(),
                 settings.device_id.clone(),
                 settings.channel_pair,
                 settings.ignored_apps.clone(),
             );
-            #[cfg(windows)]
-            let initial_sr = capture.status().sample_rate;
-            #[cfg(not(windows))]
-            let initial_sr = 48_000u32;
+            let initial_sr = capture.status().sample_rate.max(8_000);
 
             let mut dsp = DspProcessor::new(
                 initial_sr,
@@ -189,7 +184,6 @@ fn spawn_audio_dsp_engine(
                 settings.silence_reset,
             );
             let mut alerts = AlertEngine::new();
-            #[cfg(windows)]
             let mut stereo_buf: Vec<f32> = Vec::with_capacity(4096);
             let mut last_emit = Instant::now();
             let mut last_status_sig = String::new();
@@ -206,7 +200,6 @@ fn spawn_audio_dsp_engine(
                             dsp.set_ballistics(new_s.ballistics_enum());
                             dsp.set_tp_ceiling_db(new_s.tp_ceiling);
                             dsp.set_silence_reset(new_s.silence_reset);
-                            #[cfg(windows)]
                             capture.apply_config(
                                 new_s.input_source.clone(),
                                 new_s.device_id.clone(),
@@ -218,31 +211,20 @@ fn spawn_audio_dsp_engine(
                     }
                 }
 
-                #[cfg(windows)]
-                {
-                    capture.periodic_maintenance();
-                    let st = capture.status();
-                    if st.sample_rate > 0 {
-                        dsp.set_sample_rate(st.sample_rate);
-                    }
-                    capture.read_stereo(&mut stereo_buf);
-                    if !stereo_buf.is_empty() && dsp.process_interleaved(&stereo_buf) {
-                        alerts.reset();
-                        let _ = app.emit("meters-reset", ());
-                    }
+                capture.periodic_maintenance();
+                let st = capture.status();
+                if st.sample_rate > 0 {
+                    dsp.set_sample_rate(st.sample_rate);
+                }
+                capture.read_stereo(&mut stereo_buf);
+                if !stereo_buf.is_empty() && dsp.process_interleaved(&stereo_buf) {
+                    alerts.reset();
+                    let _ = app.emit("meters-reset", ());
                 }
 
                 if last_emit.elapsed() >= emit_interval {
                     last_emit = Instant::now();
-                    #[cfg(windows)]
                     let st = capture.status();
-                    #[cfg(not(windows))]
-                    let st = CaptureStatus {
-                        mode: CaptureMode::None,
-                        device_name: "CoreAudio / System Audio".into(),
-                        sample_rate: 48_000,
-                        message: None,
-                    };
 
                     let sig = format!("{:?}:{}:{}:{:?}", st.mode, st.device_name, st.sample_rate, st.message);
                     if sig != last_status_sig {

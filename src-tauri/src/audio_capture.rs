@@ -856,19 +856,493 @@ mod win_impl {
 pub use win_impl::{enumerate_audio_sessions, list_output_devices};
 
 #[cfg(not(windows))]
-pub fn list_output_devices() -> Vec<DeviceInfo> {
-    vec![DeviceInfo {
-        id: "default".to_string(),
-        name: "System Audio Output (CoreAudio)".to_string(),
-        channels: 2,
-        sample_rate: 48_000,
-        is_default: true,
-    }]
+mod mac_impl {
+    use super::*;
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    use std::sync::Arc;
+
+    pub fn device_priority(name: &str, channels: u32, is_default: bool) -> u8 {
+        let lower = name.to_ascii_lowercase();
+        if lower.contains("loop-back")
+            || lower.contains("loopback")
+            || lower.contains("blackhole")
+            || lower.contains("soundflower")
+            || lower.contains("existential")
+            || lower.contains("monitor")
+        {
+            return 0;
+        }
+        if lower.contains("audient")
+            || lower.contains("id14")
+            || lower.contains("id4")
+            || lower.contains("id24")
+            || lower.contains("id44")
+            || lower.contains("scarlett")
+            || lower.contains("focusrite")
+            || lower.contains("motu")
+            || lower.contains("rme")
+            || lower.contains("apollo")
+            || lower.contains("universal audio")
+            || lower.contains("volt")
+            || lower.contains("ssl")
+            || lower.contains("apogee")
+            || channels >= 4
+        {
+            return 1;
+        }
+        if is_default {
+            return 2;
+        }
+        3
+    }
+
+    fn best_input_config(dev: &cpal::Device) -> Option<(cpal::SupportedStreamConfig, u32, u32)> {
+        let default_cfg = dev.default_input_config().ok();
+        let default_sr = default_cfg.as_ref().map(|c| c.sample_rate().0).unwrap_or(48_000);
+        let mut best_ch = default_cfg.as_ref().map(|c| c.channels() as u32).unwrap_or(2);
+        let mut chosen: Option<cpal::SupportedStreamConfig> = default_cfg;
+
+        if let Ok(ranges) = dev.supported_input_configs() {
+            for r in ranges {
+                let ch = r.channels() as u32;
+                if ch >= best_ch && ch <= 32 {
+                    let sr = if r.min_sample_rate().0 <= default_sr && default_sr <= r.max_sample_rate().0 {
+                        cpal::SampleRate(default_sr)
+                    } else if r.min_sample_rate().0 <= 48_000 && 48_000 <= r.max_sample_rate().0 {
+                        cpal::SampleRate(48_000)
+                    } else {
+                        r.max_sample_rate()
+                    };
+                    best_ch = ch;
+                    chosen = Some(r.with_sample_rate(sr));
+                }
+            }
+        }
+
+        chosen.map(|cfg| {
+            let sr = cfg.sample_rate().0;
+            let ch = cfg.channels() as u32;
+            (cfg, ch.max(1), sr)
+        })
+    }
+
+    pub fn list_output_devices() -> Vec<DeviceInfo> {
+        let host = cpal::default_host();
+        let default_name = host
+            .default_input_device()
+            .and_then(|d| d.name().ok())
+            .unwrap_or_default();
+
+        let mut out = Vec::new();
+        if let Ok(devs) = host.input_devices() {
+            for dev in devs {
+                let Ok(name) = dev.name() else { continue };
+                let Some((_, channels, sample_rate)) = best_input_config(&dev) else {
+                    continue;
+                };
+                let is_def = name == default_name;
+                out.push(DeviceInfo {
+                    id: name.clone(),
+                    name,
+                    channels: channels.max(2),
+                    sample_rate,
+                    is_default: is_def,
+                });
+            }
+        }
+
+        out.sort_by_key(|d| device_priority(&d.name, d.channels, d.is_default));
+        if let Some(first) = out.first_mut() {
+            if !out.iter().any(|d| d.is_default) {
+                first.is_default = true;
+            }
+        }
+
+        if out.is_empty() {
+            out.push(DeviceInfo {
+                id: "default".to_string(),
+                name: "CoreAudio System Input / Loopback".to_string(),
+                channels: 2,
+                sample_rate: 48_000,
+                is_default: true,
+            });
+        }
+        out
+    }
+
+    pub fn enumerate_audio_sessions() -> Vec<AudioSessionInfo> {
+        Vec::new()
+    }
+
+    pub struct MacCaptureStream {
+        pub id: String,
+        pub name: String,
+        pub channels: usize,
+        pub sample_rate: u32,
+        pub priority: u8,
+        pub queue: Arc<Mutex<Vec<f32>>>,
+        pub pair_envs: Vec<f32>,
+        pub active_pair: usize,
+        pub last_pair_switch: std::time::Instant,
+        pub env_peak: f32,
+        pub last_packet: std::time::Instant,
+        _stream: cpal::Stream,
+    }
+
+    // cpal::Stream on macOS CoreAudio is safe to hold on the dedicated audio controller thread
+    unsafe impl Send for MacCaptureStream {}
+
+    pub fn open_mac_stream(wanted_id: Option<&str>) -> Result<MacCaptureStream, String> {
+        let host = cpal::default_host();
+        let default_name = host
+            .default_input_device()
+            .and_then(|d| d.name().ok())
+            .unwrap_or_default();
+
+        let mut candidates: Vec<(u8, String, cpal::Device)> = Vec::new();
+        if let Ok(devs) = host.input_devices() {
+            for d in devs {
+                if let Ok(name) = d.name() {
+                    let ch = best_input_config(&d).map(|(_, c, _)| c).unwrap_or(2);
+                    let prio = device_priority(&name, ch, name == default_name);
+                    candidates.push((prio, name, d));
+                }
+            }
+        }
+        candidates.sort_by_key(|(prio, _, _)| *prio);
+
+        let selected = if let Some(target) = wanted_id {
+            candidates
+                .into_iter()
+                .find(|(_, name, _)| name == target)
+                .ok_or_else(|| format!("CoreAudio device '{target}' not found"))?
+        } else {
+            candidates
+                .into_iter()
+                .next()
+                .ok_or_else(|| "No CoreAudio input/loopback devices found".to_string())?
+        };
+
+        let (priority, name, device) = selected;
+        let (supported_cfg, channels_u32, sample_rate) =
+            best_input_config(&device).ok_or_else(|| format!("No supported input config for {name}"))?;
+        let channels = (channels_u32 as usize).max(1);
+        let sample_format = supported_cfg.sample_format();
+        let config: cpal::StreamConfig = supported_cfg.into();
+
+        let queue: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::with_capacity(8192)));
+        let q_clone = queue.clone();
+
+        let err_fn = |_err| {};
+        let stream = match sample_format {
+            cpal::SampleFormat::F32 => device
+                .build_input_stream(
+                    &config,
+                    move |data: &[f32], _| {
+                        let mut g = q_clone.lock();
+                        if g.len() < 65_536 {
+                            g.extend_from_slice(data);
+                        }
+                    },
+                    err_fn,
+                    None,
+                )
+                .map_err(|e| format!("build_input_stream f32 failed: {e}"))?,
+            cpal::SampleFormat::I16 => device
+                .build_input_stream(
+                    &config,
+                    move |data: &[i16], _| {
+                        let mut g = q_clone.lock();
+                        if g.len() < 65_536 {
+                            const SCALE: f32 = 1.0 / 32768.0;
+                            g.extend(data.iter().map(|&s| s as f32 * SCALE));
+                        }
+                    },
+                    err_fn,
+                    None,
+                )
+                .map_err(|e| format!("build_input_stream i16 failed: {e}"))?,
+            cpal::SampleFormat::U16 => device
+                .build_input_stream(
+                    &config,
+                    move |data: &[u16], _| {
+                        let mut g = q_clone.lock();
+                        if g.len() < 65_536 {
+                            g.extend(data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0));
+                        }
+                    },
+                    err_fn,
+                    None,
+                )
+                .map_err(|e| format!("build_input_stream u16 failed: {e}"))?,
+            _ => return Err(format!("Unsupported CoreAudio sample format on {name}")),
+        };
+
+        stream.play().map_err(|e| format!("CoreAudio stream play failed: {e}"))?;
+        let pair_count = ((channels + 1) / 2).max(1);
+        let now = std::time::Instant::now();
+        // On multi-channel interfaces like Audient iD14, hardware Loop-back is typically the last stereo pair
+        let initial_pair = if name.to_ascii_lowercase().contains("audient") && pair_count > 1 {
+            pair_count - 1
+        } else {
+            0
+        };
+
+        Ok(MacCaptureStream {
+            id: name.clone(),
+            name,
+            channels,
+            sample_rate,
+            priority,
+            queue,
+            pair_envs: vec![0.0; pair_count],
+            active_pair: initial_pair,
+            last_pair_switch: now,
+            env_peak: 0.0,
+            last_packet: now,
+            _stream: stream,
+        })
+    }
 }
 
 #[cfg(not(windows))]
-pub fn enumerate_audio_sessions() -> Vec<AudioSessionInfo> {
-    Vec::new()
+pub use mac_impl::{enumerate_audio_sessions, list_output_devices};
+
+#[cfg(not(windows))]
+pub struct AudioCaptureController {
+    input_source: String,
+    desired_device_id: Option<String>,
+    channel_pair: usize,
+    streams: Vec<mac_impl::MacCaptureStream>,
+    active_stream_idx: usize,
+    last_stream_switch: std::time::Instant,
+    device_name: String,
+    sample_rate: u32,
+    mode: CaptureMode,
+    status_msg: Option<String>,
+    raw_scratch: Vec<f32>,
+}
+
+#[cfg(not(windows))]
+impl AudioCaptureController {
+    pub fn new(
+        input_source: String,
+        device_id: Option<String>,
+        channel_pair: usize,
+        _ignored_apps: Vec<String>,
+    ) -> Self {
+        let mut ctrl = Self {
+            input_source,
+            desired_device_id: device_id,
+            channel_pair,
+            streams: Vec::new(),
+            active_stream_idx: 0,
+            last_stream_switch: std::time::Instant::now(),
+            device_name: "CoreAudio Loopback".to_string(),
+            sample_rate: 48_000,
+            mode: CaptureMode::EndpointLoopback,
+            status_msg: None,
+            raw_scratch: Vec::with_capacity(8192),
+        };
+        ctrl.reconfigure();
+        ctrl
+    }
+
+    pub fn apply_config(
+        &mut self,
+        input_source: String,
+        device_id: Option<String>,
+        channel_pair: usize,
+        _ignored_apps: Vec<String>,
+    ) {
+        let changed = self.input_source != input_source || self.desired_device_id != device_id;
+        self.input_source = input_source;
+        self.desired_device_id = device_id;
+        self.channel_pair = channel_pair;
+        if changed {
+            self.reconfigure();
+        }
+    }
+
+    pub fn reconfigure(&mut self) {
+        self.streams.clear();
+        self.active_stream_idx = 0;
+        self.status_msg = None;
+
+        if let Some(ref wanted) = self.desired_device_id {
+            match mac_impl::open_mac_stream(Some(wanted)) {
+                Ok(s) => {
+                    self.sample_rate = s.sample_rate;
+                    self.device_name = s.name.clone();
+                    self.mode = CaptureMode::EndpointLoopback;
+                    self.streams.push(s);
+                }
+                Err(e) => {
+                    self.mode = CaptureMode::None;
+                    self.status_msg = Some(e);
+                }
+            }
+            return;
+        }
+
+        // Automatic mode on macOS: open top candidate loopback / audio interface streams
+        let devs = list_output_devices();
+        for d in devs.into_iter().take(4) {
+            if let Ok(s) = mac_impl::open_mac_stream(Some(&d.id)) {
+                self.streams.push(s);
+            }
+        }
+
+        if let Some(first) = self.streams.first() {
+            self.sample_rate = first.sample_rate;
+            self.device_name = first.name.clone();
+            self.mode = CaptureMode::EndpointLoopback;
+        } else {
+            self.mode = CaptureMode::None;
+            self.status_msg = Some("No CoreAudio input/loopback device available".to_string());
+        }
+    }
+
+    pub fn periodic_maintenance(&mut self) {
+        if self.streams.is_empty() && self.desired_device_id.is_none() {
+            self.reconfigure();
+        }
+    }
+
+    pub fn read_stereo(&mut self, out: &mut Vec<f32>) {
+        out.clear();
+        if self.streams.is_empty() {
+            return;
+        }
+
+        let now = std::time::Instant::now();
+        let wanted_pair = self.channel_pair;
+        let auto_mode = self.desired_device_id.is_none() && wanted_pair == 0;
+        let mut chosen_stereo: Vec<f32> = Vec::new();
+
+        for (s_idx, s) in self.streams.iter_mut().enumerate() {
+            self.raw_scratch.clear();
+            {
+                let mut q = s.queue.lock();
+                if !q.is_empty() {
+                    std::mem::swap(&mut self.raw_scratch, &mut *q);
+                }
+            }
+
+            let ch = s.channels.max(1);
+            let frames = self.raw_scratch.len() / ch;
+            if frames == 0 {
+                if now.duration_since(s.last_packet).as_millis() > 50 {
+                    s.env_peak *= 0.85;
+                    if s.env_peak < 1e-5 {
+                        s.env_peak = 0.0;
+                    }
+                    for pe in &mut s.pair_envs {
+                        *pe *= 0.85;
+                    }
+                }
+                continue;
+            }
+
+            s.last_packet = now;
+            let pair_count = s.pair_envs.len().max(1);
+
+            // Update per-stereo-pair envelope peaks across all channel pairs of this device
+            for p_idx in 0..pair_count {
+                let c_l = (p_idx * 2).min(ch - 1);
+                let c_r = (p_idx * 2 + 1).min(ch - 1);
+                let mut pk = 0.0f32;
+                for f in 0..frames {
+                    let base = f * ch;
+                    let a = self.raw_scratch[base + c_l].abs().max(self.raw_scratch[base + c_r].abs());
+                    if a > pk {
+                        pk = a;
+                    }
+                }
+                let prev = s.pair_envs[p_idx];
+                s.pair_envs[p_idx] = if pk > prev { pk } else { prev * 0.88 + pk * 0.12 };
+            }
+
+            let use_pair = if wanted_pair > 0 {
+                wanted_pair.min(pair_count - 1)
+            } else if pair_count > 1 {
+                // In Automatic mode on multi-channel interfaces (e.g. Audient iD14 where Loop-back is on higher channels),
+                // stay on active_pair unless it is silent (<= 1e-4) and another stereo pair has signal (> 1e-4).
+                let cur_env = s.pair_envs[s.active_pair];
+                if cur_env <= 1e-4 && now.duration_since(s.last_pair_switch).as_millis() > 1000 {
+                    // Check higher pairs first (hardware loopback channels on Audient / Focusrite / RME)
+                    if let Some((best_p, &best_v)) = s
+                        .pair_envs
+                        .iter()
+                        .enumerate()
+                        .rev()
+                        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                    {
+                        if best_v > 1e-4 {
+                            s.active_pair = best_p;
+                            s.last_pair_switch = now;
+                        }
+                    }
+                }
+                s.active_pair
+            } else {
+                0
+            };
+
+            s.env_peak = s.pair_envs[use_pair];
+
+            if s_idx == self.active_stream_idx {
+                let c_l = (use_pair * 2).min(ch - 1);
+                let c_r = (use_pair * 2 + 1).min(ch - 1);
+                chosen_stereo.reserve(frames * 2);
+                for f in 0..frames {
+                    let base = f * ch;
+                    chosen_stereo.push(self.raw_scratch[base + c_l]);
+                    chosen_stereo.push(self.raw_scratch[base + c_r]);
+                }
+            }
+        }
+
+        if auto_mode && self.streams.len() > 1 {
+            let cur_env = self.streams.get(self.active_stream_idx).map(|s| s.env_peak).unwrap_or(0.0);
+            if cur_env <= 1e-4 && now.duration_since(self.last_stream_switch).as_millis() > 1500 {
+                if let Some((best_idx, best_s)) = self
+                    .streams
+                    .iter()
+                    .enumerate()
+                    .max_by(|a, b| a.1.env_peak.partial_cmp(&b.1.env_peak).unwrap_or(std::cmp::Ordering::Equal))
+                {
+                    if best_s.env_peak > 1e-4 {
+                        self.active_stream_idx = best_idx;
+                        self.last_stream_switch = now;
+                    }
+                }
+            }
+        }
+
+        if let Some(active) = self.streams.get(self.active_stream_idx) {
+            self.sample_rate = active.sample_rate;
+            if active.pair_envs.len() > 1 && self.channel_pair == 0 {
+                let ch_start = active.active_pair * 2 + 1;
+                let ch_end = (active.active_pair * 2 + 2).min(active.channels);
+                self.device_name = format!("{} (Ch {}-{})", active.name, ch_start, ch_end);
+            } else {
+                self.device_name = active.name.clone();
+            }
+            self.mode = CaptureMode::EndpointLoopback;
+        }
+
+        out.extend_from_slice(&chosen_stereo);
+    }
+
+    pub fn status(&self) -> CaptureStatus {
+        CaptureStatus {
+            mode: self.mode,
+            device_name: self.device_name.clone(),
+            sample_rate: self.sample_rate,
+            message: self.status_msg.clone(),
+        }
+    }
 }
 
 #[cfg(windows)]

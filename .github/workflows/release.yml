@@ -43,6 +43,7 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
+          cache-workspace-crates: false
 
       - name: Install frontend dependencies
         run: npm ci
@@ -52,7 +53,7 @@ jobs:
 
       - name: Run DSP Conformance Unit Tests
         if: matrix.args != '--target x86_64-apple-darwin'
-        run: cargo test --manifest-path src-tauri/Cargo.toml --lib --release
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
 
       - name: Build & Upload Tauri Release Bundles (.exe / .msi / .dmg / .app)
         uses: tauri-apps/tauri-action@v0

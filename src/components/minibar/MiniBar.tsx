@@ -86,23 +86,29 @@ export function MiniBar() {
   useEffect(() => {
     if (!isTauri || !rowRef.current) return;
     let timer: number | null = null;
-    const ro = new ResizeObserver((entries) => {
-      const entry = entries[0];
-      if (!entry) return;
-      const w = Math.ceil(entry.contentRect.width) + 28;
+    const measureAndResize = () => {
+      const el = rowRef.current;
+      if (!el) return;
+      const rawW = Math.max(el.getBoundingClientRect().width, el.scrollWidth);
+      if (rawW < 60) return;
+      const w = Math.ceil(rawW) + 28;
       if (Math.abs(w - lastWidthRef.current) < 2) return;
       if (timer) window.clearTimeout(timer);
       timer = window.setTimeout(() => {
         lastWidthRef.current = w;
         void api.setMiniBarWidth(w);
-      }, 80);
+      }, 60);
+    };
+    measureAndResize();
+    const ro = new ResizeObserver(() => {
+      measureAndResize();
     });
     ro.observe(rowRef.current);
     return () => {
       if (timer) window.clearTimeout(timer);
       ro.disconnect();
     };
-  }, [settings.miniBarMetrics]);
+  }, [settings.miniBarMetrics, resetFlash]);
 
   // Magnetic edge-snapping after window move settles
   useEffect(() => {
@@ -191,41 +197,44 @@ export function MiniBar() {
         background: "var(--lm-mini-bg)",
         borderColor: clipped ? "rgba(239, 68, 68, 0.65)" : "var(--lm-mini-border)",
       }}
-      className="h-[28px] w-full flex items-center justify-center rounded-full border px-3 backdrop-blur-md transition-colors duration-200"
+      className="relative h-[28px] w-full flex items-center justify-center rounded-full border px-3 backdrop-blur-md transition-colors duration-200"
     >
-      {resetFlash ? (
-        <span className="lm-flash text-[11px] font-bold tracking-widest text-good">
+      {resetFlash && (
+        <span className="lm-flash pointer-events-none absolute inset-0 flex items-center justify-center text-[11px] font-bold tracking-widest text-good">
           METERS RESET
         </span>
-      ) : (
-        <div ref={rowRef} className="inline-flex items-center gap-2 whitespace-nowrap">
-          <span
-            className="h-1.5 w-1.5 rounded-full transition-colors duration-300"
-            style={{
-              backgroundColor: clipped ? "#EF4444" : active ? "#10B981" : "#6B7280",
-              boxShadow: active ? "0 0 6px rgba(16,185,129,0.7)" : "none",
-            }}
-          />
-          {metrics.map((m, idx) => {
-            const val = readMetric(m, telemetry, holdMax);
-            const color = metricColor(m, settings.miniBarTextColor, active, clipped);
-            return (
-              <div key={m} className="inline-flex items-center gap-1">
-                {idx > 0 && <span className="text-[10px] text-muted/45 select-none">|</span>}
-                <span className="text-[10px] font-semibold tracking-wider text-muted">
-                  {LABELS[m]}
-                </span>
-                <span
-                  style={{ color }}
-                  className="num text-[12px] font-bold transition-colors duration-300"
-                >
-                  {m === "tp" ? fmtPeak(val) : fmtLufs(val)}
-                </span>
-              </div>
-            );
-          })}
-        </div>
       )}
+      <div
+        ref={rowRef}
+        style={{ opacity: resetFlash ? 0 : 1 }}
+        className="inline-flex items-center gap-2 whitespace-nowrap transition-opacity duration-150"
+      >
+        <span
+          className="h-1.5 w-1.5 shrink-0 rounded-full transition-colors duration-300"
+          style={{
+            backgroundColor: clipped ? "#EF4444" : active ? "#10B981" : "#6B7280",
+            boxShadow: active ? "0 0 6px rgba(16,185,129,0.7)" : "none",
+          }}
+        />
+        {metrics.map((m, idx) => {
+          const val = readMetric(m, telemetry, holdMax);
+          const color = metricColor(m, settings.miniBarTextColor, active, clipped);
+          return (
+            <div key={m} className="inline-flex items-center gap-1">
+              {idx > 0 && <span className="text-[10px] text-muted/45 select-none">|</span>}
+              <span className="text-[10px] font-semibold tracking-wider text-muted">
+                {LABELS[m]}
+              </span>
+              <span
+                style={{ color }}
+                className="num inline-block min-w-[28px] text-center text-[12px] font-bold transition-colors duration-300"
+              >
+                {m === "tp" ? fmtPeak(val) : fmtLufs(val)}
+              </span>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
